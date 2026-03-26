@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.env.local
+*.db
+*.sqlite
+schema.json
+__pycache__/
+*.pyc
+.env
+
+page-patches.js
+BMW_Vehicle_Inventory.csv
+bmw.db
+schema.json

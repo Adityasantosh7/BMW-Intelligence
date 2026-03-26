@@ -1,0 +1,293 @@
+{
+  "name": "BMW BI Dashboard — v3 Production",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "stats",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "stats-webhook",
+      "name": "Webhook — Stats",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [120, 80],
+      "webhookId": "bmw-stats-001"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "YOUR_DB_SERVER_URL_HERE/stats",
+        "options": { "timeout": 15000 }
+      },
+      "id": "http-stats",
+      "name": "HTTP — Get Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [340, 80]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Content-Type", "value": "application/json" }
+            ]
+          }
+        }
+      },
+      "id": "stats-respond",
+      "name": "Respond — Stats",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [560, 80]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "query",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "query-webhook",
+      "name": "Webhook — Query",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [120, 320],
+      "webhookId": "bmw-query-001"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "YOUR_DB_SERVER_URL_HERE/schema",
+        "options": { "timeout": 10000 }
+      },
+      "id": "http-schema",
+      "name": "HTTP — Get Schema",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [340, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build the Groq API request body for SQL generation\nconst schemaInfo = $('HTTP — Get Schema').first().json;\nconst webhookBody = $('Webhook — Query').first().json.body || $('Webhook — Query').first().json;\nconst userQuery = (webhookBody.query || '').trim();\nconst history = webhookBody.history || [];\n\nif (!userQuery) throw new Error('Empty query');\n\n// Build schema description\nconst cols = (schemaInfo.columns || []).map(c => {\n  const cat = schemaInfo.categoricalSamples?.[c.name];\n  const num = schemaInfo.numericRanges?.[c.name];\n  if (cat?.length) return `  ${c.name} ${c.type}  — values: ${cat.slice(0,12).join(', ')}`;\n  if (num) return `  ${c.name} ${c.type}  — range: ${num.min} – ${num.max}, avg ${num.avg}`;\n  return `  ${c.name} ${c.type}`;\n}).join('\\n');\n\nconst schemaBlock = `Table: ${schemaInfo.tableName || 'inventory'}\\nColumns:\\n${cols}\\nTotal rows: ${(schemaInfo.totalRows || 0).toLocaleString()}`;\n\nconst historyMsgs = history.slice(-4)\n  .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text || '' }))\n  .filter(m => m.content);\n\nconst systemPrompt = `You are an expert SQLite analyst.\\n\\n${schemaBlock}\\n\\nRules:\\n1. Return ONLY a valid JSON object — no markdown fences, no prose\\n2. Only write SELECT statements\\n3. Table name is always \"inventory\"\\n4. Use TRIM() on TEXT columns in WHERE/GROUP BY\\n5. Use ROUND(value,1) for decimals; ROUND(value,0) for money\\n6. Cap non-aggregated queries with LIMIT 100\\n7. For time-series, ORDER BY the time column\\n8. If the query CANNOT be answered, set \"error\": true\\n\\nReturn this exact JSON shape:\\n{\\n  \"sql\": \"SELECT ...\",\\n  \"suggested_chart_type\": \"bar|line|pie|scatter|area\",\\n  \"x_axis\": \"column_name\",\\n  \"y_axis\": \"column_name\",\\n  \"color_by\": null,\\n  \"title\": \"Short title\",\\n  \"error\": false,\\n  \"message\": \"\"\\n}`;\n\nconst messages = [\n  { role: 'system', content: systemPrompt },\n  ...historyMsgs,\n  { role: 'user', content: `Generate SQL for: \"${userQuery}\"` }\n];\n\nreturn [{\n  json: {\n    groqBody: JSON.stringify({\n      model: 'llama-3.3-70b-versatile',\n      messages,\n      temperature: 0.05,\n      max_tokens: 700\n    }),\n    original_query: userQuery,\n    history\n  }\n}];"
+      },
+      "id": "build-sql-prompt",
+      "name": "Code — Build SQL Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_GROQ_API_KEY_HERE" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.groqBody }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-groq-sql",
+      "name": "HTTP — Groq SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [780, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse Groq SQL response\nconst groqResponse = $input.first().json;\nconst prevData = $('Code — Build SQL Prompt').first().json;\n\nconst content = groqResponse.choices?.[0]?.message?.content?.trim() || '';\nconst cleaned = content.replace(/```json\\s*/gi, '').replace(/```\\s*/g, '').trim();\nconst match = cleaned.match(/\\{[\\s\\S]*\\}/);\n\nif (!match) throw new Error('Groq returned no JSON: ' + content.slice(0, 200));\n\nlet parsed;\ntry { parsed = JSON.parse(match[0]); }\ncatch (e) { throw new Error('JSON parse failed: ' + match[0].slice(0, 200)); }\n\nreturn [{ json: { ...parsed, original_query: prevData.original_query, history: prevData.history } }];"
+      },
+      "id": "parse-sql-response",
+      "name": "Code — Parse SQL Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Validate SQL — SELECT only, propagate errors\nconst input = $input.first().json;\n\nif (input.error) {\n  return [{ json: { ...input, __skip_db: true } }];\n}\n\nif (!input.sql || !input.sql.trim().toUpperCase().startsWith('SELECT')) {\n  return [{ json: {\n    error: true, __skip_db: true,\n    message: 'Could not generate a valid SQL query. Try rephrasing.',\n    original_query: input.original_query,\n    charts: []\n  }}];\n}\n\nreturn [{ json: input }];"
+      },
+      "id": "validate-sql",
+      "name": "Code — Validate SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1220, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "YOUR_DB_SERVER_URL_HERE/execute-sql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ sql: $json.sql }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-execute-sql",
+      "name": "HTTP — Execute SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Merge SQL results with metadata\nconst sqlMeta = $('Code — Validate SQL').first().json;\nconst dbResult = $input.first().json;\n\nif (sqlMeta.error || sqlMeta.__skip_db) {\n  return [{ json: { ...sqlMeta, charts: [] } }];\n}\n\nif (!dbResult.rows || dbResult.rows.length === 0) {\n  return [{ json: {\n    error: true,\n    message: 'The query returned no results. Try broadening your filters.',\n    original_query: sqlMeta.original_query,\n    sql: sqlMeta.sql,\n    charts: []\n  }}];\n}\n\nreturn [{ json: {\n  rows: dbResult.rows,\n  row_count: dbResult.row_count,\n  columns: dbResult.columns,\n  sql: sqlMeta.sql,\n  original_query: sqlMeta.original_query,\n  suggested_chart_type: sqlMeta.suggested_chart_type,\n  x_axis: sqlMeta.x_axis,\n  y_axis: sqlMeta.y_axis,\n  title: sqlMeta.title,\n  color_by: sqlMeta.color_by,\n  history: sqlMeta.history,\n  error: false\n}}];"
+      },
+      "id": "merge-results",
+      "name": "Code — Merge Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1660, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Build the Groq API request body for chart config generation\nconst input = $input.first().json;\n\nif (input.error) {\n  return [{ json: { ...input, __skip_chart: true } }];\n}\n\nconst { rows, row_count, columns, sql, original_query, suggested_chart_type, x_axis, y_axis, title, color_by } = input;\n\nconst sampleRows = rows.slice(0, 50);\nconst dataKeys = columns || (sampleRows.length > 0 ? Object.keys(sampleRows[0]) : []);\n\nconst systemPrompt = `You are a senior business intelligence analyst. Given SQL query results, produce chart configuration and actionable insights.\\n\\nReturn ONLY a valid JSON object — no markdown, no explanation, nothing else.\\n\\nFormat:\\n{\\n  \"charts\": [\\n    {\\n      \"title\": \"Concise title (max 8 words)\",\\n      \"chart_type\": \"bar|line|pie|scatter|area\",\\n      \"x_axis\": \"exact_column_key\",\\n      \"y_axis\": \"exact_column_key\",\\n      \"color_by\": null,\\n      \"insight\": \"2-3 sentences with specific numbers. Most surprising or actionable finding.\",\\n      \"follow_up_suggestions\": [\"Follow-up 1\", \"Follow-up 2\", \"Follow-up 3\"]\\n    }\\n  ]\\n}\\n\\nChart selection rules:\\n- line or area: x-axis is a time dimension (year, month, date)\\n- pie: 2-6 categories showing distribution/share\\n- scatter: correlation between two numeric columns\\n- bar: all other cases\\n\\nYou MAY return 2 charts if data supports two complementary views. Never more than 2.\\nx_axis and y_axis MUST be exact keys from the data columns — copy verbatim.`;\n\nconst userPrompt = `Question: \"${original_query}\"\\nSQL: ${sql}\\nRows: ${row_count}\\nColumns: ${dataKeys.join(', ')}\\nSuggested: ${suggested_chart_type} | x: ${x_axis} | y: ${y_axis}\\n\\nData (first ${sampleRows.length} rows):\\n${JSON.stringify(sampleRows)}`;\n\nreturn [{\n  json: {\n    groqBody: JSON.stringify({\n      model: 'llama-3.3-70b-versatile',\n      messages: [\n        { role: 'system', content: systemPrompt },\n        { role: 'user', content: userPrompt }\n      ],\n      temperature: 0.3,\n      max_tokens: 1400\n    }),\n    rows, row_count, columns, sql, original_query,\n    suggested_chart_type, x_axis, y_axis, title, color_by\n  }\n}];"
+      },
+      "id": "build-chart-prompt",
+      "name": "Code — Build Chart Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1880, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer YOUR_GROQ_API_KEY_HERE" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.groqBody }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-groq-chart",
+      "name": "HTTP — Groq Chart",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2100, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Parse Groq chart response and inject full data\nconst groqResponse = $input.first().json;\nconst prevData = $('Code — Build Chart Prompt').first().json;\n\nif (prevData.__skip_chart || prevData.error) {\n  return [{ json: prevData }];\n}\n\nconst content = groqResponse.choices?.[0]?.message?.content?.trim() || '';\nconst cleaned = content.replace(/```json\\s*/gi, '').replace(/```\\s*/g, '').trim();\nconst match = cleaned.match(/\\{[\\s\\S]*\\}/);\n\nif (!match) throw new Error('No JSON in chart response: ' + content.slice(0, 200));\n\nlet parsed;\ntry { parsed = JSON.parse(match[0]); }\ncatch (e) { throw new Error('Chart JSON parse error: ' + match[0].slice(0, 200)); }\n\nconst charts = (parsed.charts || []).map(c => ({\n  ...c,\n  data: prevData.rows,\n  sql: prevData.sql,\n  row_count: prevData.row_count\n}));\n\nif (!charts.length) throw new Error('Groq returned empty charts array');\n\nreturn [{ json: { charts, error: false } }];"
+      },
+      "id": "parse-chart-response",
+      "name": "Code — Parse Chart Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2320, 320]
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "// Final validation and shape normalisation\nconst input = $input.first().json;\n\nif (input.error) {\n  return [{ json: {\n    error: true,\n    message: input.message || 'Could not answer this question. Try rephrasing.',\n    charts: []\n  }}];\n}\n\nconst VALID = new Set(['bar','line','area','pie','scatter','donut']);\n\nconst safeCharts = (input.charts || []).map(chart => {\n  const ct = (chart.chart_type || 'bar').toLowerCase();\n  const keys = chart.data?.length > 0 ? Object.keys(chart.data[0]) : [];\n  const xKey = keys.includes(chart.x_axis) ? chart.x_axis : keys[0] || 'x';\n  const yKey = keys.includes(chart.y_axis) ? chart.y_axis : keys[1] || 'y';\n\n  return {\n    title: chart.title || 'Analysis',\n    chart_type: VALID.has(ct) ? ct : 'bar',\n    x_axis: xKey,\n    y_axis: yKey,\n    color_by: chart.color_by || null,\n    data: chart.data || [],\n    sql: chart.sql || '',\n    row_count: chart.row_count || (chart.data?.length ?? 0),\n    insight: chart.insight || '',\n    follow_up_suggestions: (chart.follow_up_suggestions || []).slice(0, 3)\n  };\n});\n\nif (!safeCharts.length) {\n  return [{ json: {\n    error: true,\n    message: 'No charts were generated. Try a more specific question.',\n    charts: []\n  }}];\n}\n\nreturn [{ json: { charts: safeCharts, error: false } }];"
+      },
+      "id": "format-response",
+      "name": "Code — Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2540, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Content-Type", "value": "application/json" }
+            ]
+          }
+        }
+      },
+      "id": "query-respond",
+      "name": "Respond — Query",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2760, 320]
+    }
+  ],
+  "connections": {
+    "Webhook — Stats": {
+      "main": [[{ "node": "HTTP — Get Stats", "type": "main", "index": 0 }]]
+    },
+    "HTTP — Get Stats": {
+      "main": [[{ "node": "Respond — Stats", "type": "main", "index": 0 }]]
+    },
+    "Webhook — Query": {
+      "main": [[{ "node": "HTTP — Get Schema", "type": "main", "index": 0 }]]
+    },
+    "HTTP — Get Schema": {
+      "main": [[{ "node": "Code — Build SQL Prompt", "type": "main", "index": 0 }]]
+    },
+    "Code — Build SQL Prompt": {
+      "main": [[{ "node": "HTTP — Groq SQL", "type": "main", "index": 0 }]]
+    },
+    "HTTP — Groq SQL": {
+      "main": [[{ "node": "Code — Parse SQL Response", "type": "main", "index": 0 }]]
+    },
+    "Code — Parse SQL Response": {
+      "main": [[{ "node": "Code — Validate SQL", "type": "main", "index": 0 }]]
+    },
+    "Code — Validate SQL": {
+      "main": [[{ "node": "HTTP — Execute SQL", "type": "main", "index": 0 }]]
+    },
+    "HTTP — Execute SQL": {
+      "main": [[{ "node": "Code — Merge Results", "type": "main", "index": 0 }]]
+    },
+    "Code — Merge Results": {
+      "main": [[{ "node": "Code — Build Chart Prompt", "type": "main", "index": 0 }]]
+    },
+    "Code — Build Chart Prompt": {
+      "main": [[{ "node": "HTTP — Groq Chart", "type": "main", "index": 0 }]]
+    },
+    "HTTP — Groq Chart": {
+      "main": [[{ "node": "Code — Parse Chart Response", "type": "main", "index": 0 }]]
+    },
+    "Code — Parse Chart Response": {
+      "main": [[{ "node": "Code — Format Response", "type": "main", "index": 0 }]]
+    },
+    "Code — Format Response": {
+      "main": [[{ "node": "Respond — Query", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": ["bmw", "bi-dashboard", "groq", "v3"],
+  "pinData": {}
+}
